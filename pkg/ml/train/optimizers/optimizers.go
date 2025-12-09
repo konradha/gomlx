@@ -68,6 +68,7 @@ var (
 		"adamax":  func(ctx *context.Context) Interface { return Adam().Adamax().FromContext(ctx).Done() },
 		"adamw":   func(ctx *context.Context) Interface { return Adam().WeightDecay(0.004).FromContext(ctx).Done() },
 		"rmsprop": func(ctx *context.Context) Interface { return RMSProp().FromContext(ctx).Done() },
+		"muon":    func(ctx *context.Context) Interface { return Muon().FromContext(ctx).Done() },
 	}
 
 	// ParamOptimizer is the context parameter with the name of the optimizer.
@@ -129,6 +130,12 @@ func FromContext(ctx *context.Context) Interface {
 	optName := context.GetParamOr(ctx, ParamOptimizer, "adamw")
 	return ByName(ctx, optName)
 }
+
+const (
+    ParamMuonBeta         = "muon_beta"
+    ParamMuonNSIterations = "muon_ns_iterations"
+    ParamMuonEpsilon      = "muon_epsilon"
+)
 
 // ByName returns an optimizer given the name, or panics if one does not exist.
 // It uses KnownOptimizers -- in case one wants to better handle invalid values.
