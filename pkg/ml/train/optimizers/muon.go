@@ -20,26 +20,25 @@ type MuonConfig struct {
 	scopeName    string
 	dtype        dtypes.DType
 	learningRate float64
-	beta         float64
+	momentum     float64
+	nesterov     bool
 	nsIterations int
-	epsilon      float64
 }
 
 func Muon() *MuonConfig {
 	return &MuonConfig{
 		scopeName:    MuonDefaultScope,
 		learningRate: -1,
-		beta:         0.95,
+		momentum:     0.6,
+		nesterov:     true,
 		nsIterations: 5,
-		epsilon:      1e-7,
 		dtype:        dtypes.InvalidDType,
 	}
 }
 
 func (c *MuonConfig) FromContext(ctx *context.Context) *MuonConfig {
-	c.beta = context.GetParamOr(ctx, ParamMuonBeta, c.beta)
+	c.momentum = context.GetParamOr(ctx, ParamMuonMomentum, c.momentum)
 	c.nsIterations = context.GetParamOr(ctx, ParamMuonNSIterations, c.nsIterations)
-	c.epsilon = context.GetParamOr(ctx, ParamMuonEpsilon, c.epsilon)
 	return c
 }
 
@@ -58,18 +57,18 @@ func (c *MuonConfig) LearningRate(value float64) *MuonConfig {
 	return c
 }
 
-func (c *MuonConfig) Beta(beta float64) *MuonConfig {
-	c.beta = beta
+func (c *MuonConfig) Momentum(m float64) *MuonConfig {
+	c.momentum = m
+	return c
+}
+
+func (c *MuonConfig) Nesterov(n bool) *MuonConfig {
+	c.nesterov = n
 	return c
 }
 
 func (c *MuonConfig) NSIterations(n int) *MuonConfig {
 	c.nsIterations = n
-	return c
-}
-
-func (c *MuonConfig) Epsilon(eps float64) *MuonConfig {
-	c.epsilon = eps
 	return c
 }
 
@@ -109,18 +108,17 @@ func (o *muon) UpdateGraphWithGradients(ctx *context.Context, grads []*Node, los
 
 	_ = IncrementGlobalStepGraph(ctx, g, dtype)
 
-	beta := Const(g, shapes.CastAsDType(o.config.beta, dtype))
-	onePlusBeta := Const(g, shapes.CastAsDType(1.0+o.config.beta, dtype))
+	momentum := Const(g, shapes.CastAsDType(o.config.momentum, dtype))
 
 	numTrainable := len(grads)
 	varIdx := 0
 	for v := range ctx.IterVariables() {
 		if v.Trainable && v.InUseByGraph(g) {
 			if varIdx < numTrainable {
-				if v.Shape().Rank() == 2 {
-					o.applyMuonGraph(ctx, g, v, dtype, grads[varIdx], learningRate, beta, onePlusBeta)
+				if v.Shape().Rank() >= 2 {
+					o.applyMuonGraph(ctx, g, v, dtype, grads[varIdx], learningRate, momentum)
 				} else {
-					o.applyFallbackGraph(ctx, g, v, dtype, grads[varIdx], learningRate)
+					o.applyFallbackGraph(ctx, g, v, dtype, grads[varIdx], learningRate, momentum)
 				}
 			}
 			varIdx++
@@ -131,14 +129,6 @@ func (o *muon) UpdateGraphWithGradients(ctx *context.Context, grads []*Node, los
 	}
 }
 
-func identityMatrix(g *Graph, dtype dtypes.DType, n int) *Node {
-	indices := Iota(g, shapes.Make(dtypes.Int32, n), 0)
-	return ConvertDType(Equal(
-		ExpandDims(indices, 1),
-		ExpandDims(indices, 0),
-	), dtype)
-}
-
 func transposeMatrix(X *Node) *Node {
 	return Transpose(X, 1, 0)
 }
@@ -147,40 +137,40 @@ func transposeMatrix(X *Node) *Node {
 // For G=USV.T ~> U V.T
 // https://arxiv.org/abs/2502.16982
 func newtonSchulzOrthogonalize(X *Node, iterations int) *Node {
-	shape := X.Shape()
-	m, n := shape.Dim(0), shape.Dim(1)
 	g := X.Graph()
 	dtype := X.DType()
 
-	frobNorm := Sqrt(ReduceAllSum(Square(X)))
-	scale := Const(g, shapes.CastAsDType(1.0/float64(max(m, n)), dtype))
-	X = Div(X, Add(frobNorm, Const(g, shapes.CastAsDType(1e-12, dtype))))
-	X = Mul(X, Sqrt(scale))
+	a := Const(g, shapes.CastAsDType(3.4445, dtype))
+	b := Const(g, shapes.CastAsDType(-4.7750, dtype))
+	c := Const(g, shapes.CastAsDType(2.0315, dtype))
 
-	tall := m >= n
+	norm := Sqrt(ReduceAllSum(Square(X)))
+	eps := Const(g, shapes.CastAsDType(1e-7, dtype))
+	X = Div(X, Add(norm, eps))
+
+	shape := X.Shape()
+	m, n := shape.Dim(0), shape.Dim(1)
+	transposed := m > n
+
+	if transposed {
+		X = transposeMatrix(X)
+	}
 
 	for range iterations {
-		if tall {
-			XtX := MatMul(transposeMatrix(X), X)
-			I := identityMatrix(g, dtype, n)
-			factor := Sub(MulScalar(I, 3.0), XtX)
-			X = MulScalar(MatMul(X, factor), 0.5)
-		} else {
-			XXt := MatMul(X, transposeMatrix(X))
-			I := identityMatrix(g, dtype, m)
-			factor := Sub(MulScalar(I, 3.0), XXt)
-			X = MulScalar(MatMul(factor, X), 0.5)
-		}
+		A := MatMul(X, transposeMatrix(X))
+		B := Add(Mul(b, A), Mul(c, MatMul(A, A)))
+		X = Add(Mul(a, X), MatMul(B, X))
+	}
+
+	if transposed {
+		X = transposeMatrix(X)
 	}
 
 	return X
 }
 
 func (o *muon) applyMuonGraph(ctx *context.Context, g *Graph, v *context.Variable, dtype dtypes.DType,
-	grad *Node, learningRate, beta, onePlusBeta *Node) {
-
-	mVar := o.getMomentumVariable(ctx, v, dtype)
-	mCurr := mVar.ValueGraph(g)
+	grad *Node, learningRate, momentum *Node) {
 
 	if grad.DType() != dtype {
 		grad = ConvertDType(grad, dtype)
@@ -188,18 +178,46 @@ func (o *muon) applyMuonGraph(ctx *context.Context, g *Graph, v *context.Variabl
 	TraceNaNInGradients(ctx, v, grad)
 	grad = ClipNaNsInGradients(ctx, grad)
 
-	mNew := Add(Mul(beta, mCurr), grad)
+	mVar := o.getMomentumVariable(ctx, v, dtype)
+	buf := mVar.ValueGraph(g)
 
-	nesterov := Sub(Mul(onePlusBeta, mNew), Mul(beta, mCurr))
+	newBuf := Add(Mul(momentum, buf), grad)
+	mVar.SetValueGraph(newBuf)
 
-	U := newtonSchulzOrthogonalize(nesterov, o.config.nsIterations)
+	var update *Node
+	if o.config.nesterov {
+		update = Add(grad, Mul(momentum, newBuf))
+	} else {
+		update = newBuf
+	}
 
 	value := v.ValueGraph(g)
 	if value.DType() != dtype {
 		value = ConvertDType(value, dtype)
 	}
 
-	step := Mul(learningRate, U)
+	numElements := Const(g, shapes.CastAsDType(float64(v.Shape().Size()), dtype))
+	valueNorm := Sqrt(ReduceAllSum(Square(value)))
+	eps := Const(g, shapes.CastAsDType(1e-12, dtype))
+	value = Mul(value, Div(Sqrt(numElements), Add(valueNorm, eps)))
+
+	originalShape := update.Shape().Clone()
+	var update2D *Node
+	if originalShape.Rank() == 2 {
+		update2D = update
+	} else {
+		rows := originalShape.Dim(0)
+		cols := originalShape.Size() / rows
+		update2D = Reshape(update, rows, cols)
+	}
+
+	whitened := newtonSchulzOrthogonalize(update2D, o.config.nsIterations)
+
+	if originalShape.Rank() != 2 {
+		whitened = Reshape(whitened, originalShape.Dimensions...)
+	}
+
+	step := Mul(learningRate, whitened)
 
 	clipByValue := context.GetParamOr(ctx, ParamClipStepByValue, 0.0)
 	if clipByValue > 0 {
@@ -213,12 +231,10 @@ func (o *muon) applyMuonGraph(ctx *context.Context, g *Graph, v *context.Variabl
 		updated = ConvertDType(updated, v.Shape().DType)
 	}
 	v.SetValueGraph(updated)
-
-	mVar.SetValueGraph(mNew)
 }
 
 func (o *muon) applyFallbackGraph(ctx *context.Context, g *Graph, v *context.Variable, dtype dtypes.DType,
-	grad *Node, learningRate *Node) {
+	grad *Node, learningRate, momentum *Node) {
 
 	if grad.DType() != dtype {
 		grad = ConvertDType(grad, dtype)
@@ -226,12 +242,25 @@ func (o *muon) applyFallbackGraph(ctx *context.Context, g *Graph, v *context.Var
 	TraceNaNInGradients(ctx, v, grad)
 	grad = ClipNaNsInGradients(ctx, grad)
 
+	mVar := o.getMomentumVariable(ctx, v, dtype)
+	buf := mVar.ValueGraph(g)
+
+	newBuf := Add(Mul(momentum, buf), grad)
+	mVar.SetValueGraph(newBuf)
+
+	var update *Node
+	if o.config.nesterov {
+		update = Add(grad, Mul(momentum, newBuf))
+	} else {
+		update = newBuf
+	}
+
 	value := v.ValueGraph(g)
 	if value.DType() != dtype {
 		value = ConvertDType(value, dtype)
 	}
 
-	step := Mul(learningRate, grad)
+	step := Mul(learningRate, update)
 
 	clipByValue := context.GetParamOr(ctx, ParamClipStepByValue, 0.0)
 	if clipByValue > 0 {
@@ -264,6 +293,5 @@ func (o *muon) getMomentumVariable(ctx *context.Context, trainable *context.Vari
 }
 
 func (o *muon) Clear(ctx *context.Context) error {
-	ctxMuon := ctx.In(o.config.scopeName)
-	return ctxMuon.DeleteVariablesInScope()
+	return ctx.In(o.config.scopeName).DeleteVariablesInScope()
 }

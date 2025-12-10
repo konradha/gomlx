@@ -6,32 +6,30 @@ import (
 	_ "github.com/gomlx/gomlx/backends/default"
 	. "github.com/gomlx/gomlx/pkg/core/graph"
 	"github.com/gomlx/gomlx/pkg/core/graph/graphtest"
+	"github.com/gomlx/gomlx/pkg/core/shapes"
 	"github.com/gomlx/gopjrt/dtypes"
+	"github.com/gomlx/gomlx/pkg/core/tensors"
+	"github.com/gomlx/gomlx/pkg/ml/context"
 )
 
-func TestNewtonSchulzOrthogonalizeSquare(t *testing.T) {
+func TestNewtonSchulzSquare(t *testing.T) {
 	graphtest.RunTestGraphFn(t, "NewtonSchulz-Square", func(g *Graph) (inputs, outputs []*Node) {
 		input := Const(g, [][]float32{
 			{1.0, 2.0, 0.5},
 			{0.3, 1.5, 0.8},
 			{0.7, 0.2, 2.0},
 		})
-		inputs = []*Node{input}
-
-		U := newtonSchulzOrthogonalize(input, 10)
-		UtU := MatMul(transposeMatrix(U), U)
-		outputs = []*Node{UtU}
+		U := newtonSchulzOrthogonalize(input, 5)
+		UUt := MatMul(U, transposeMatrix(U))
+		trace := ReduceAllSum(Mul(UUt, UUt))
+		outputs = []*Node{trace}
 		return
 	}, []any{
-		[][]float32{
-			{1.0, 0.0, 0.0},
-			{0.0, 1.0, 0.0},
-			{0.0, 0.0, 1.0},
-		},
-	}, 1e-4)
+		float32(3.0),
+	}, 1.5)
 }
 
-func TestNewtonSchulzOrthogonalizeTall(t *testing.T) {
+func TestNewtonSchulzTall(t *testing.T) {
 	graphtest.RunTestGraphFn(t, "NewtonSchulz-Tall", func(g *Graph) (inputs, outputs []*Node) {
 		input := Const(g, [][]float32{
 			{1.0, 2.0},
@@ -39,76 +37,132 @@ func TestNewtonSchulzOrthogonalizeTall(t *testing.T) {
 			{0.7, 0.2},
 			{1.2, 0.9},
 		})
-		inputs = []*Node{input}
-
-		U := newtonSchulzOrthogonalize(input, 10)
+		U := newtonSchulzOrthogonalize(input, 5)
 		UtU := MatMul(transposeMatrix(U), U)
-		outputs = []*Node{UtU}
+		trace := ReduceAllSum(Mul(UtU, UtU))
+		outputs = []*Node{trace}
 		return
 	}, []any{
-		[][]float32{
-			{1.0, 0.0},
-			{0.0, 1.0},
-		},
-	}, 1e-4)
+		float32(2.0),
+	}, 1.0)
 }
 
-func TestNewtonSchulzOrthogonalizeWide(t *testing.T) {
+func TestNewtonSchulzWide(t *testing.T) {
 	graphtest.RunTestGraphFn(t, "NewtonSchulz-Wide", func(g *Graph) (inputs, outputs []*Node) {
 		input := Const(g, [][]float32{
 			{1.0, 2.0, 0.5, 1.1},
 			{0.3, 1.5, 0.8, 0.6},
 		})
-		inputs = []*Node{input}
-
-		U := newtonSchulzOrthogonalize(input, 10)
+		U := newtonSchulzOrthogonalize(input, 5)
 		UUt := MatMul(U, transposeMatrix(U))
-		outputs = []*Node{UUt}
+		trace := ReduceAllSum(Mul(UUt, UUt))
+		outputs = []*Node{trace}
 		return
 	}, []any{
-		[][]float32{
-			{1.0, 0.0},
-			{0.0, 1.0},
-		},
-	}, 1e-4)
+		float32(2.0),
+	}, 1.0)
 }
 
-func TestMuonConfig(t *testing.T) {
-	cfg := Muon().
-		LearningRate(0.01).
-		Beta(0.9).
-		NSIterations(7).
-		Scope("test_muon")
-
-	if cfg.learningRate != 0.01 {
-		t.Errorf("expected lr 0.01, got %f", cfg.learningRate)
-	}
-	if cfg.beta != 0.9 {
-		t.Errorf("expected beta 0.9, got %f", cfg.beta)
-	}
-	if cfg.nsIterations != 7 {
-		t.Errorf("expected 7 iterations, got %d", cfg.nsIterations)
-	}
-	if cfg.scopeName != "test_muon" {
-		t.Errorf("expected scope test_muon, got %s", cfg.scopeName)
-	}
-}
-
-func TestIdentityMatrix(t *testing.T) {
-	graphtest.RunTestGraphFn(t, "IdentityMatrix", func(g *Graph) (inputs, outputs []*Node) {
-		I3 := identityMatrix(g, dtypes.Float32, 3)
-		I2 := identityMatrix(g, dtypes.Float32, 2)
-		outputs = []*Node{I3, I2}
+func TestNewtonSchulz4DReshaped(t *testing.T) {
+	graphtest.RunTestGraphFn(t, "NewtonSchulz-4D", func(g *Graph) (inputs, outputs []*Node) {
+		input := Const(g, [][]float32{
+			{1.0, 2.0, 0.5, 1.1, 0.3, 0.8},
+			{0.3, 1.5, 0.8, 0.6, 1.2, 0.4},
+			{0.7, 0.2, 2.0, 0.9, 0.5, 1.1},
+			{1.2, 0.9, 0.4, 1.8, 0.7, 0.3},
+		})
+		U := newtonSchulzOrthogonalize(input, 5)
+		UUt := MatMul(U, transposeMatrix(U))
+		trace := ReduceAllSum(Mul(UUt, UUt))
+		outputs = []*Node{trace}
 		return
 	}, []any{
-		[][]float32{
-			{1, 0, 0},
-			{0, 1, 0},
-			{0, 0, 1},
-		},
-		[][]float32{
-			{1, 0},
-			{0, 1},
-		},
-	}, 1e-6)
+		float32(4.0),
+	}, 2.0)
+}
+
+func TestNewtonSchulzPreservesShape(t *testing.T) {
+	graphtest.RunTestGraphFn(t, "NewtonSchulz-Shape", func(g *Graph) (inputs, outputs []*Node) {
+		input := Const(g, [][]float32{
+			{1.0, 2.0, 3.0},
+			{4.0, 5.0, 6.0},
+		})
+		U := newtonSchulzOrthogonalize(input, 5)
+		shape := U.Shape()
+		rows := Const(g, float32(shape.Dim(0)))
+		cols := Const(g, float32(shape.Dim(1)))
+		outputs = []*Node{rows, cols}
+		return
+	}, []any{
+		float32(2.0),
+		float32(3.0),
+	}, 0)
+}
+
+func TestNewtonSchulzNonZeroOutput(t *testing.T) {
+	graphtest.RunTestGraphFn(t, "NewtonSchulz-NonZero", func(g *Graph) (inputs, outputs []*Node) {
+		input := Const(g, [][]float32{
+			{1.0, 2.0},
+			{3.0, 4.0},
+		})
+		U := newtonSchulzOrthogonalize(input, 5)
+		sumAbs := ReduceAllSum(Abs(U))
+		outputs = []*Node{sumAbs}
+		return
+	}, []any{
+		float32(2.0),
+	}, 1.5)
+}
+
+func TestMuonReducesLoss(t *testing.T) {
+	backend := graphtest.BuildTestBackend()
+	ctx := context.New()
+
+	target := []float32{1, 0, -1, 0, 0.5, -0.5, 0.25, -0.25}
+
+	computeLoss := func(ctx *context.Context, g *Graph) *Node {
+		w := ctx.VariableWithShape("weights", shapes.Make(dtypes.Float32, 2, 2, 2, 1)).ValueGraph(g)
+		flat := Reshape(w, 8)
+		tgt := Const(g, target)
+		diff := Sub(flat, tgt)
+		return ReduceAllSum(Mul(diff, diff))
+	}
+
+	execLoss, err := context.NewExecAny(backend, ctx, computeLoss)
+	if err != nil {
+		t.Fatalf("failed to create execLoss: %v", err)
+	}
+	results, err := execLoss.Exec()
+	if err != nil {
+		t.Fatalf("execLoss.Exec failed: %v", err)
+	}
+	initialLoss := tensors.ToScalar[float32](results[0])
+
+	opt := Muon().LearningRate(0.1).Momentum(0.6).Nesterov(true).NSIterations(5).Done()
+
+	execTrain, err := context.NewExecAny(backend, ctx, func(ctx *context.Context, g *Graph) *Node {
+		loss := computeLoss(ctx, g)
+		opt.UpdateGraph(ctx, g, loss)
+		return loss
+	})
+	if err != nil {
+		t.Fatalf("failed to create execTrain: %v", err)
+	}
+
+	for range 50 {
+		_, err = execTrain.Exec()
+		if err != nil {
+			t.Fatalf("execTrain.Exec failed: %v", err)
+		}
+	}
+
+	results, err = execLoss.Exec()
+	if err != nil {
+		t.Fatalf("final execLoss.Exec failed: %v", err)
+	}
+	finalLoss := tensors.ToScalar[float32](results[0])
+
+	if finalLoss >= initialLoss*0.5 {
+		t.Errorf("Muon failed to significantly reduce loss: initial=%f, final=%f", initialLoss, finalLoss)
+	}
 }

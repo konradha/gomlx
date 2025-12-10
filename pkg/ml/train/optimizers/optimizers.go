@@ -132,9 +132,8 @@ func FromContext(ctx *context.Context) Interface {
 }
 
 const (
-    ParamMuonBeta         = "muon_beta"
+    ParamMuonMomentum     = "muon_momentum"
     ParamMuonNSIterations = "muon_ns_iterations"
-    ParamMuonEpsilon      = "muon_epsilon"
 )
 
 // ByName returns an optimizer given the name, or panics if one does not exist.
